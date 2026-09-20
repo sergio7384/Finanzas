@@ -258,6 +258,38 @@
   .gasto-swipe .gasto-row{ position:relative; background:var(--card-solid); transition:transform 320ms var(--spring); }
   .gasto-swipe:not(.armado) .gasto-swipe__fondo{ opacity:0.55; }
 
+  /* Tendencia de gasto mensual */
+  .tend-titular{ font-size:12.5px; font-weight:700; color:var(--text-dim); margin-top:4px; }
+  /* Cifra protagonista: misma tipografía que el resto y sin tabular-nums, que
+     a tamaño grande deja los dígitos sueltos. */
+  .tend-hero{ font-size:34px; font-weight:800; letter-spacing:-0.02em; line-height:1.15; margin:2px 0 3px; }
+  .tend-hero.bien{ color:#34D399; }
+  .tend-hero.mal{ color:#FF5A5F; }
+  .tend-sub{ font-size:11.5px; color:var(--text-faint); line-height:1.4; margin-bottom:14px; }
+  .tend-svg{ width:100%; height:auto; display:block; overflow:visible; }
+  .tend-mes{ font-size:10px; font-weight:700; fill:var(--text-faint); letter-spacing:0.04em; }
+  .tend-mes.ahora{ fill:var(--text-dim); }
+  .tend-valor{ font-size:11px; font-weight:800; fill:var(--text); }
+  .tend-hit{ cursor:pointer; }
+  .tend-tooltip{
+    margin-top:6px; font-size:11.5px; font-weight:700; color:var(--text-dim);
+    min-height:14px; opacity:0; transition:opacity 180ms;
+  }
+  .tend-tooltip.visible{ opacity:1; }
+  .tend-pie{ font-size:11.5px; color:var(--text-faint); line-height:1.5; margin-top:4px; }
+  .tend-pie b{ color:var(--text-dim); font-weight:800; }
+  .tend-tabla-btn{
+    margin-top:10px; border:0; background:transparent; padding:6px 0; font-family:inherit;
+    font-size:11.5px; font-weight:700; color:var(--text-dim); text-decoration:underline;
+    text-underline-offset:3px; text-decoration-color:var(--text-faint);
+  }
+  /* Los valores también se leen aquí: la gráfica y el toque no son la única
+     forma de llegar a un número. */
+  .tend-tabla{ margin-top:6px; border-top:1px solid var(--border); padding-top:8px; }
+  .tend-fila{ display:flex; justify-content:space-between; gap:12px; padding:5px 0;
+    font-size:12.5px; color:var(--text-dim); font-variant-numeric:tabular-nums; text-transform:capitalize; }
+  .tend-fila.ahora{ color:var(--text); font-weight:700; }
+
   /* Te deben */
   .deuda-total{ font-size:13px; font-weight:800; color:#F472B6; font-variant-numeric:tabular-nums; }
   .deuda-row{ display:flex; align-items:center; gap:10px; padding:10px 0; border-bottom:1px solid var(--border); }
@@ -716,7 +748,7 @@
    a las diez, la décima sube sola (2.49 -> 2.5). Tiene que coincidir con
    la de package.json y con la del nombre de caché de sw.js: hay un
    comprobador en scripts/check-version.mjs que lo verifica. */
-const APP_VERSION = '2.59';
+const APP_VERSION = '2.6';
 
 /* ============ ICONS ============ */
 const ICONS = {
@@ -1316,6 +1348,8 @@ function renderResumen(){
       ${last ? `<div class="hint" style="text-align:left; margin-top:8px;">${deltaBadge(n, last.neto)} <span style="color:var(--text-faint)">vs ${last.label.toLowerCase()}</span></div>` : ''}
     </div>
 
+    ${renderTendenciaGasto()}
+
     <div style="margin:20px 2px 10px; font-size:12px; font-weight:700; letter-spacing:0.06em; color:var(--text-dim); text-transform:uppercase;">Distribución bancaria</div>
     ${BANKS.map(bk=>`
       <div class="card bank-card">
@@ -1345,6 +1379,7 @@ function renderResumen(){
   // Los sliders ya no viven aquí: se abren desde el botón de la cabecera.
   document.getElementById('btnDistribucion')
     .addEventListener('click', ()=> renderDistribucionSheet());
+  wireTendencia();
 
   document.getElementById('btnGuardar').addEventListener('click', guardarNomina);
   updateStreakBadge();
@@ -1593,6 +1628,122 @@ function aplicarNomina(opciones){
       'Antes de seguir, ¿quieres cribar lo que te ha sobrado del mes anterior entre Ahorro, Coche y Caprichos?',
       ()=> renderCribaSheet());
   }, 1000);
+}
+
+/* ============ RENDER: TENDENCIA DE GASTO ============ */
+/* Una sola serie, así que un solo color y sin leyenda: el título ya dice qué
+   es. Los meses pasados van en gris y el actual en rojo (destacar uno y
+   apagar el resto), no un degradado por tamaño: la altura de la barra ya
+   cuenta la magnitud y pintarla además por color no añade nada. */
+let tablaTendencia = false;
+
+function barraPath(x, y, w, h, r){
+  const rr = Math.min(r, w/2, h);
+  // Solo se redondea el extremo libre; el pie se queda pegado a la base.
+  return `M${x},${y+h} L${x},${y+rr} Q${x},${y} ${x+rr},${y} L${x+w-rr},${y} Q${x+w},${y} ${x+w},${y+rr} L${x+w},${y+h} Z`;
+}
+
+function renderTendenciaGasto(){
+  const r = resumenGastoMensual();
+  if(!r) return '';
+
+  const W = 340, ALTO_PLOT = 104, BANDA = 20, H = ALTO_PLOT + BANDA;
+  const n = r.serie.length;
+  // Marcas finas y con aire: una barra ancha y maciza lee como un bloque.
+  const hueco = 18;
+  const ancho = Math.min(34, (W - hueco * (n - 1)) / n);
+  const margen = (W - (ancho * n + hueco * (n - 1))) / 2;
+  const tope = Math.max(...r.serie.map(m=> m.total), r.mediaMes, 1);
+  const alturaDe = v => Math.max(v > 0 ? 3 : 0, (v / tope) * ALTO_PLOT);
+
+  const barras = r.serie.map((m,i)=>{
+    const h = alturaDe(m.total);
+    const x = margen + i * (ancho + hueco);
+    const y = ALTO_PLOT - h;
+    const color = m.esActual ? '#FF5A5F' : 'rgba(255,255,255,0.26)';
+    return `
+      <path d="${barraPath(x, y, ancho, h, 4)}" fill="${color}"/>
+      <rect class="tend-hit" x="${x - hueco/2}" y="0" width="${ancho + hueco}" height="${H}"
+            fill="transparent" data-mes="${i}"/>`;
+  }).join('');
+
+  // Línea de referencia: es un umbral de verdad (la media), no una rejilla.
+  const yMedia = ALTO_PLOT - (r.mediaMes / tope) * ALTO_PLOT;
+  const referencia = `
+    <line x1="0" y1="${yMedia.toFixed(1)}" x2="${W}" y2="${yMedia.toFixed(1)}"
+          stroke="var(--text-faint)" stroke-width="1" stroke-dasharray="3 4" opacity="0.7"/>`;
+
+  const etiquetas = r.serie.map((m,i)=>{
+    const x = margen + i * (ancho + hueco) + ancho/2;
+    return `<text x="${x.toFixed(1)}" y="${H - 5}" class="tend-mes ${m.esActual?'ahora':''}"
+                  text-anchor="middle">${m.corto}</text>`;
+  }).join('');
+
+  // Se etiqueta solo el mes en curso; el resto se leen al tocar o en la tabla.
+  const hAct = alturaDe(r.actual.total);
+  const xAct = margen + (n - 1) * (ancho + hueco) + ancho/2;
+  const valorActual = r.actual.total > 0
+    ? `<text x="${xAct.toFixed(1)}" y="${Math.max(9, ALTO_PLOT - hAct - 5).toFixed(1)}"
+             class="tend-valor" text-anchor="middle">${fmt(r.actual.total)}</text>`
+    : '';
+
+  const ahorra = r.diferencia >= 0;
+  const titular = ahorra
+    ? `Este mes has ahorrado`
+    : `Este mes has gastado de más`;
+
+  const tabla = r.serie.map(m=>`
+    <div class="tend-fila${m.esActual?' ahora':''}">
+      <span>${m.etiqueta.toLowerCase()}</span>
+      <span>${fmt(m.total)}</span>
+    </div>`).join('');
+
+  return `
+    <div class="card" id="cardTendencia">
+      <div class="card-head">
+        <div class="icon" style="background:#FF5A5F">${ICONS.trend}</div><span>Gasto mensual</span>
+      </div>
+
+      <div class="tend-titular">${titular}</div>
+      <div class="tend-hero ${ahorra?'bien':'mal'}">${fmt(Math.abs(r.diferencia))}</div>
+      <div class="tend-sub">frente a lo que sueles llevar gastado el día ${r.dia}</div>
+
+      <svg class="tend-svg" viewBox="0 0 ${W} ${H}" role="img"
+           aria-label="Gasto de los últimos ${n} meses. Este mes ${fmt(r.actual.total)}. Media de meses anteriores ${fmt(r.mediaMes)}.">
+        ${referencia}${barras}${etiquetas}${valorActual}
+      </svg>
+      <div class="tend-tooltip" id="tendTooltip"></div>
+
+      <div class="tend-pie">Los meses anteriores habías gastado <b>${fmt(r.mediaMes)}</b> de media al mes</div>
+      <button type="button" class="tend-tabla-btn" id="tendTablaBtn">${tablaTendencia ? 'Ocultar' : 'Ver'} los números</button>
+      ${tablaTendencia ? `<div class="tend-tabla">${tabla}</div>` : ''}
+    </div>`;
+}
+
+function wireTendencia(){
+  const btn = document.getElementById('tendTablaBtn');
+  if(btn) btn.addEventListener('click', ()=>{
+    tablaTendencia = !tablaTendencia;
+    renderResumen();
+  });
+
+  const svg = document.querySelector('.tend-svg');
+  const tip = document.getElementById('tendTooltip');
+  if(!svg || !tip) return;
+  const serie = serieGastoMensual();
+  // El área sensible de cada barra ocupa su hueco entero, para no tener que
+  // acertar sobre una barra de 3 px de alto.
+  svg.querySelectorAll('.tend-hit').forEach(hit=>{
+    const mostrar = ()=>{
+      const m = serie[parseInt(hit.dataset.mes)];
+      tip.textContent = `${m.etiqueta.toLowerCase()} · ${fmt(m.total)}`;
+      tip.classList.add('visible');
+      clearTimeout(tip._t);
+      tip._t = setTimeout(()=> tip.classList.remove('visible'), 2400);
+    };
+    hit.addEventListener('click', mostrar);
+    hit.addEventListener('touchstart', mostrar, {passive:true});
+  });
 }
 
 /* ============ RENDER: TE DEBEN ============ */
@@ -2495,6 +2646,55 @@ function borrarDeuda(id){
   if(i === -1) return;
   state.teDeben.splice(i, 1);
   save();
+}
+
+/* ---------- Tendencia de gasto mensual (todas las huchas juntas) ---------- */
+const MESES_TENDENCIA = 6;
+
+/* Recorre los últimos meses de calendario, no los que aparezcan en el libro:
+   así un mes sin ningún gasto sale como cero en vez de desaparecer, que es
+   justo lo que hay que ver en una tendencia. */
+function serieGastoMensual(n = MESES_TENDENCIA){
+  const hoy = new Date();
+  const diaHoy = hoy.getDate();
+  const serie = [];
+  for(let i = n - 1; i >= 0; i--){
+    const d = new Date(hoy.getFullYear(), hoy.getMonth() - i, 1);
+    serie.push({
+      anio: d.getFullYear(), mes: d.getMonth(),
+      etiqueta: `${monthNames[d.getMonth()]} DE ${d.getFullYear()}`,
+      corto: monthNames[d.getMonth()].slice(0,3),
+      total: 0, hastaHoy: 0, esActual: i === 0,
+    });
+  }
+  for(const g of (state.gastos || [])){
+    const d = new Date(g.date);
+    if(isNaN(d.getTime())) continue;
+    const fila = serie.find(x=> x.mes === d.getMonth() && x.anio === d.getFullYear());
+    if(!fila) continue;
+    const imp = importeGasto(g);
+    fila.total += imp;
+    // Lo gastado a estas alturas del mes, para poder comparar al mismo ritmo.
+    if(d.getDate() <= diaHoy) fila.hastaHoy += imp;
+  }
+  return serie;
+}
+
+/* El mes en curso va a medias, así que compararlo contra meses enteros diría
+   "has ahorrado" cada día 2. Se compara con lo que solías llevar gastado a
+   estas mismas alturas. */
+function resumenGastoMensual(){
+  const serie = serieGastoMensual();
+  const actual = serie[serie.length - 1];
+  const previos = serie.slice(0, -1).filter(m=> m.total > 0);
+  if(previos.length === 0) return null;
+  const mediaRitmo = previos.reduce((s,m)=> s + m.hastaHoy, 0) / previos.length;
+  const mediaMes   = previos.reduce((s,m)=> s + m.total, 0) / previos.length;
+  return {
+    serie, actual, previos, mediaRitmo, mediaMes,
+    diferencia: mediaRitmo - actual.hastaHoy,   // positiva = has gastado menos
+    dia: new Date().getDate(),
+  };
 }
 
 /* ---------- Lo que sueles gastar en cada hucha ---------- */

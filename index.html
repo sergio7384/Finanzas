@@ -788,7 +788,7 @@
    a las diez, la décima sube sola (2.49 -> 2.5). Tiene que coincidir con
    la de package.json y con la del nombre de caché de sw.js: hay un
    comprobador en scripts/check-version.mjs que lo verifica. */
-const APP_VERSION = '2.62';
+const APP_VERSION = '2.63';
 
 /* ============ ICONS ============ */
 const ICONS = {
@@ -3235,10 +3235,13 @@ const renderers = {resumen:renderResumen, huchas:renderHuchas, historial:renderH
 const viewsEl = document.getElementById('views');
 const trackEl = document.getElementById('viewsTrack');
 
-/* La cinta mide tres pantallas de ancho; moverse es llevarla a -idx/3. */
+/* Los porcentajes de translate van sobre el ancho del PROPIO elemento, y la
+   cinta mide una pantalla: sus hijos llevan flex-basis 100% del contenedor y
+   se desbordan, pero ella no crece. Así que cada pestaña es un -100%, no un
+   -100/3% como si la cinta midiera las tres. */
 function moverCinta(idx, animar){
   trackEl.classList.toggle('animando', !!animar);
-  trackEl.style.transform = `translate3d(${-idx * 100 / tabs.length}%,0,0)`;
+  trackEl.style.transform = `translate3d(${-idx * 100}%,0,0)`;
 }
 
 /* Qué pestañas ocupan alto. Solo la activa, salvo mientras se arrastra o se
@@ -3332,7 +3335,7 @@ trackEl.addEventListener('touchmove', e=>{
   // nada más en vez de quedarse muerto.
   const borde = (idxInicio === 0 && dx > 0) || (idxInicio === tabs.length - 1 && dx < 0);
   const mov = borde ? dx * 0.32 : dx;
-  const base = -idxInicio * 100 / tabs.length;
+  const base = -idxInicio * 100;
   trackEl.style.transform = `translate3d(calc(${base}% + ${mov}px),0,0)`;
 }, {passive:true});
 

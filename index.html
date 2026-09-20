@@ -360,7 +360,7 @@
     background:rgba(255,255,255,0.14);
     border:1px solid rgba(255,255,255,0.16);
     border-radius:19px;
-    transition:transform 380ms var(--spring);
+    transition:transform 300ms cubic-bezier(0.22,0.9,0.28,1);
     box-shadow:0 4px 14px rgba(0,0,0,0.35), 0 1px 0 rgba(255,255,255,0.25) inset;
   }
   .navbtn{
@@ -373,25 +373,21 @@
   .navbtn:active{ transform:scale(0.9); }
   .navbtn svg{ width:19px; height:19px; }
 
-  /* ---------- Vistas: carrusel que sigue al dedo ---------- */
-  /* La altura sale sola: las pestañas que no se ven se pliegan a cero, así la
-     cinta mide lo que la visible sin que el JS tenga que medir nada. Medirlo
-     no valía: con content-visibility las tarjetas de fuera de pantalla dan
-     una altura estimada, no la real. */
-  .views{ position:relative; overflow:hidden; }
-  .views-track{
-    display:flex; align-items:flex-start;
-    /* El navegador se queda el gesto vertical (scroll) y nos deja el
-       horizontal, así se puede arrastrar sin bloquear el scroll. */
-    touch-action:pan-y;
+  /* ---------- Vistas ---------- */
+  /* Solo existe en pantalla la pestaña activa: las otras ni maquetan ni
+     pintan. Es lo más barato que hay y lo que hace que el cambio vaya fino
+     en un móvil de verdad. */
+  .views{ position:relative; padding:14px 16px 0; }
+  .view{ display:none; }
+  .view.active{ display:block; }
+  /* Entra subiendo un poco y apareciendo. Solo opacity y transform, que van
+     en el compositor: sin reflujo, sin repintar nada más. Corta a propósito:
+     una transición larga se percibe como lentitud, no como suavidad. */
+  .view.entrando{ animation:entraVista 260ms cubic-bezier(0.22,0.9,0.28,1) both; }
+  @keyframes entraVista{
+    from{ opacity:0; transform:translate3d(0,10px,0); }
+    to{ opacity:1; transform:translate3d(0,0,0); }
   }
-  .view{ flex:0 0 100%; min-width:0; padding:14px 16px 0; box-sizing:border-box;
-    height:0; overflow:hidden; }
-  /* Abiertas: la activa siempre, y la vecina mientras dura el gesto. */
-  .view.abierta{ height:auto; overflow:visible; }
-  /* Solo se anima transform, que va en el compositor. La curva sale rápido y
-     frena al final, que es lo que se percibe como suave. */
-  .views-track.animando{ transition:transform 420ms cubic-bezier(0.22,0.9,0.28,1); }
 
 
   /* ---------- Cards (liquid glass panels) ---------- */
@@ -710,14 +706,10 @@
     <div id="streakBadge"></div>
   </header>
 
-  <!-- Las tres pestañas van una al lado de otra en una cinta que sigue al
-       dedo; antes solo se pintaba la activa y el cambio era un salto. -->
   <div class="views" id="views">
-    <div class="views-track" id="viewsTrack">
-      <section class="view" id="view-resumen"></section>
-      <section class="view" id="view-huchas"></section>
-      <section class="view" id="view-historial"></section>
-    </div>
+    <section class="view active" id="view-resumen"></section>
+    <section class="view" id="view-huchas"></section>
+    <section class="view" id="view-historial"></section>
   </div>
 </div>
 
@@ -788,7 +780,7 @@
    a las diez, la décima sube sola (2.49 -> 2.5). Tiene que coincidir con
    la de package.json y con la del nombre de caché de sw.js: hay un
    comprobador en scripts/check-version.mjs que lo verifica. */
-const APP_VERSION = '2.63';
+const APP_VERSION = '2.64';
 
 /* ============ ICONS ============ */
 const ICONS = {
@@ -948,6 +940,11 @@ function hayEdicionEnCurso(){
 }
 
 function repintarDesdeRemoto(){
+  // Llega estado nuevo de otro dispositivo sin pasar por save(), así que las
+  // pestañas ocultas hay que marcarlas a mano o enseñarían datos viejos. Va
+  // antes de la salida de abajo: el estado ya ha cambiado aunque el repintado
+  // se aplace por estar editando.
+  marcarVistasSucias();
   if(hayEdicionEnCurso()){ repintadoPendiente = true; return; }
   repintadoPendiente = false;
   updateQuickStats();
@@ -1158,6 +1155,9 @@ let saveTimer = null;
 let savePendiente = false;
 
 function save(){
+  // Todo cambio de datos pasa por aquí, así que es el sitio donde marcar
+  // las pestañas ocultas para que se repinten antes de volver a enseñarlas.
+  if(typeof marcarVistasSucias === 'function') marcarVistasSucias();
   // Espejo local inmediato: si se va la red o se cierra la app de golpe,
   // el último estado sigue aquí y load() lo recupera.
   try{ if(window.localStorage) localStorage.setItem(claveLocal(), JSON.stringify(state)); }catch(e){}
@@ -1214,7 +1214,10 @@ async function load(){
       if(raw) cargado = JSON.parse(raw);
     }catch(e){}
   }
-  if(cargado) state = mergeState(cargado);
+  if(cargado){
+    state = mergeState(cargado);
+    marcarVistasSucias();
+  }
 }
 
 /* ============ HELPERS ============ */
@@ -3233,135 +3236,61 @@ let activeTab = 'resumen';
 const renderers = {resumen:renderResumen, huchas:renderHuchas, historial:renderHistorial};
 
 const viewsEl = document.getElementById('views');
-const trackEl = document.getElementById('viewsTrack');
 
-/* Los porcentajes de translate van sobre el ancho del PROPIO elemento, y la
-   cinta mide una pantalla: sus hijos llevan flex-basis 100% del contenedor y
-   se desbordan, pero ella no crece. Así que cada pestaña es un -100%, no un
-   -100/3% como si la cinta midiera las tres. */
-function moverCinta(idx, animar){
-  trackEl.classList.toggle('animando', !!animar);
-  trackEl.style.transform = `translate3d(${-idx * 100}%,0,0)`;
+/* Una pestaña a la vez. El carrusel que las llevaba todas montadas se movía
+   bien en el banco de pruebas pero no en un móvil de verdad: durante el
+   arrastre había dos vistas enteras maquetándose y pintándose a la vez. */
+
+/* Las vistas que no se ven quedan desfasadas cuando cambian los datos. En
+   vez de repintar las tres en cada cambio, se marcan y se repinta la que
+   toca justo antes de enseñarla. */
+/* Arranca con las tres pendientes: ninguna se ha pintado todavía. */
+const vistasSucias = new Set(tabs);
+function marcarVistasSucias(){
+  tabs.forEach(t=>{ if(t !== activeTab) vistasSucias.add(t); });
 }
 
-/* Qué pestañas ocupan alto. Solo la activa, salvo mientras se arrastra o se
-   anima, que también la vecina para que se vea entera mientras entra. */
-function abrir(...indices){
-  [...trackEl.children].forEach((v,i)=> v.classList.toggle('abierta', indices.includes(i)));
-}
-
-function pintarNav(idx){
-  document.querySelectorAll('.navbtn').forEach((b,i)=> b.classList.toggle('active', i === idx));
-  document.getElementById('navpill').style.transform = `translateX(${idx * 100}%)`;
-}
+let scrollPorTab = {};
 
 function setTab(name, animar = true){
   const idx = tabs.indexOf(name);
   if(idx === -1) return;
-  const previo = tabs.indexOf(activeTab);
-  activeTab = name;
-  renderers[name]();
-  pintarNav(idx);
-  // Las dos quedan abiertas hasta que la cinta llega: si la saliente se
-  // plegara al empezar, desaparecería de golpe en mitad del viaje.
-  if(animar && previo !== -1 && previo !== idx) abrir(previo, idx);
-  else abrir(idx);
-  moverCinta(idx, animar);
-  if(animar) alCerrarViaje(()=> abrir(tabs.indexOf(activeTab)));
-}
 
-/* Un solo temporizador de cierre: si se cambia de pestaña otra vez antes de
-   llegar, el anterior no debe plegar la vista equivocada. */
-let viajeTimer = null;
-function alCerrarViaje(fn){
-  clearTimeout(viajeTimer);
-  viajeTimer = setTimeout(fn, 440);
+  if(name !== activeTab) scrollPorTab[activeTab] = window.scrollY;
+  const saliente = document.getElementById('view-' + activeTab);
+  const entrante = document.getElementById('view-' + name);
+  activeTab = name;
+
+  // Lo caro se hace mientras la vista sigue oculta: si se repinta con la
+  // animación ya empezada, se come sus primeros frames y se ve a tirones.
+  if(vistasSucias.has(name)){
+    vistasSucias.delete(name);
+    renderers[name]();
+  }
+
+  document.querySelectorAll('.navbtn').forEach((b,i)=> b.classList.toggle('active', i === idx));
+  document.getElementById('navpill').style.transform = `translateX(${idx * 100}%)`;
+
+  if(saliente !== entrante) saliente.classList.remove('active');
+  entrante.classList.add('active');
+  entrante.classList.remove('entrando');
+
+  if(animar){
+    // Forzar el reflujo antes de volver a poner la clase reinicia la
+    // animación aunque se cambie de pestaña dos veces seguidas.
+    void entrante.offsetWidth;
+    entrante.classList.add('entrando');
+  }
+
+  // Cada pestaña recuerda por dónde iba, en vez de heredar el scroll de la
+  // anterior y aparecer a media altura.
+  const y = scrollPorTab[name] || 0;
+  window.scrollTo(0, Math.min(y, Math.max(0, document.body.scrollHeight - window.innerHeight)));
 }
 
 document.querySelectorAll('.navbtn').forEach(btn=>{
   btn.addEventListener('click', ()=> setTab(btn.dataset.tab));
 });
-
-/* ---------- Arrastrar entre pestañas ----------
-   La cinta sigue al dedo en tiempo real. Al soltar decide por distancia y por
-   velocidad: un gesto corto pero rápido también cambia, que es lo que se
-   espera al pasar páginas. */
-let arrastrando = false;
-let x0 = 0, y0 = 0, eje = null, dxUlt = 0, tUlt = 0, velocidad = 0, idxInicio = 0;
-
-const UMBRAL_DIST = 0.28;     // parte del ancho de pantalla
-const UMBRAL_VEL  = 0.45;     // px por ms
-
-trackEl.addEventListener('touchstart', e=>{
-  // Lo que ya maneja su propio gesto horizontal no debe mover la cinta.
-  if(e.target.closest('.gasto-swipe, input, button, .bucket-picker, .tend-svg')) return;
-  if(e.touches.length !== 1) return;
-  arrastrando = true; eje = null;
-  x0 = e.touches[0].clientX; y0 = e.touches[0].clientY;
-  dxUlt = 0; velocidad = 0; tUlt = performance.now();
-  idxInicio = tabs.indexOf(activeTab);
-  trackEl.classList.remove('animando');
-  clearTimeout(viajeTimer);
-}, {passive:true});
-
-trackEl.addEventListener('touchmove', e=>{
-  if(!arrastrando) return;
-  const dx = e.touches[0].clientX - x0;
-  const dy = e.touches[0].clientY - y0;
-
-  if(eje === null){
-    if(Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
-    // Se decide una vez y no se cambia: si no, al bajar en diagonal la cinta
-    // temblaría. Se favorece el scroll vertical.
-    eje = Math.abs(dx) > Math.abs(dy) * 1.3 ? 'x' : 'y';
-    if(eje === 'x'){
-      // Ahora que se sabe que es horizontal, la vecina tiene que estar
-      // pintada y caber a lo alto.
-      const destino = idxInicio + (dx < 0 ? 1 : -1);
-      if(destino >= 0 && destino < tabs.length){
-        renderers[tabs[destino]]();
-        abrir(idxInicio, destino);
-      }
-    }
-  }
-  if(eje !== 'x') return;
-
-  const ahora = performance.now();
-  const dt = ahora - tUlt;
-  if(dt > 0) velocidad = (dx - dxUlt) / dt;
-  dxUlt = dx; tUlt = ahora;
-
-  // En los extremos el arrastre se amortigua, para que se note que no hay
-  // nada más en vez de quedarse muerto.
-  const borde = (idxInicio === 0 && dx > 0) || (idxInicio === tabs.length - 1 && dx < 0);
-  const mov = borde ? dx * 0.32 : dx;
-  const base = -idxInicio * 100;
-  trackEl.style.transform = `translate3d(calc(${base}% + ${mov}px),0,0)`;
-}, {passive:true});
-
-function soltarCinta(){
-  if(!arrastrando) return;
-  arrastrando = false;
-  if(eje !== 'x'){ eje = null; return; }
-  eje = null;
-
-  const ancho = viewsEl.offsetWidth || 1;
-  const bastanteLejos = Math.abs(dxUlt) > ancho * UMBRAL_DIST;
-  const bastanteRapido = Math.abs(velocidad) > UMBRAL_VEL && Math.abs(dxUlt) > 12;
-  let idx = idxInicio;
-  if(bastanteLejos || bastanteRapido) idx += dxUlt < 0 ? 1 : -1;
-  idx = Math.max(0, Math.min(tabs.length - 1, idx));
-
-  if(tabs[idx] === activeTab){
-    // Vuelve a su sitio sin repintar nada.
-    moverCinta(idx, true);
-    alCerrarViaje(()=> abrir(idx));
-  } else {
-    setTab(tabs[idx]);
-  }
-}
-trackEl.addEventListener('touchend', soltarCinta, {passive:true});
-trackEl.addEventListener('touchcancel', soltarCinta, {passive:true});
 
 /* ============ SERVICE WORKER ============ */
 if('serviceWorker' in navigator){
@@ -3434,11 +3363,14 @@ async function iniciarApp(){
   setTab('resumen', false);
   requestAnimationFrame(()=>{ pill.style.transition = ''; });
 
-  // Las vecinas se pintan en cuanto la primera pantalla está servida: así no
-  // retrasan el arranque, pero ya tienen contenido antes del primer arrastre.
-  const pintarVecinas = ()=> tabs.filter(t=> t !== activeTab).forEach(t=> renderers[t]());
-  if(window.requestIdleCallback) requestIdleCallback(pintarVecinas, {timeout:1200});
-  else setTimeout(pintarVecinas, 200);
+  // Las otras se pintan en tiempo libre, ya servida la primera pantalla: así
+  // al cambiar de pestaña no hay nada que construir y la animación arranca
+  // limpia desde el primer frame.
+  const pintarRestantes = ()=>{
+    tabs.filter(t=> t !== activeTab).forEach(t=>{ renderers[t](); vistasSucias.delete(t); });
+  };
+  if(window.requestIdleCallback) requestIdleCallback(pintarRestantes, {timeout:1200});
+  else setTimeout(pintarRestantes, 200);
 }
 </script>
 </body>

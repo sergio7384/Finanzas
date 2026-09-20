@@ -373,18 +373,26 @@
   .navbtn:active{ transform:scale(0.9); }
   .navbtn svg{ width:19px; height:19px; }
 
-  /* ---------- Views / slide transition ---------- */
-  .views{ position:relative; padding:14px 16px 0; overflow-x:hidden; }
-  /* will-change permanente reserva una capa de GPU por elemento aunque no
-     se esté animando nada; la animación ya la promociona sola mientras dura. */
-  .view{ display:none; }
-  .view.active{ display:block; }
-  /* Más corta y sin escalar: 560 ms se notan lentos, y animar scale además
-     de translate obliga a repintar texto en cada frame. */
-  .view.enter-right{ animation:viewInRight 340ms cubic-bezier(0.32,0.72,0,1) both; }
-  .view.enter-left{ animation:viewInLeft 340ms cubic-bezier(0.32,0.72,0,1) both; }
-  @keyframes viewInRight{ from{ opacity:0; transform:translate3d(28px,0,0);} to{ opacity:1; transform:translate3d(0,0,0);} }
-  @keyframes viewInLeft{ from{ opacity:0; transform:translate3d(-28px,0,0);} to{ opacity:1; transform:translate3d(0,0,0);} }
+  /* ---------- Vistas: carrusel que sigue al dedo ---------- */
+  /* La altura sale sola: las pestañas que no se ven se pliegan a cero, así la
+     cinta mide lo que la visible sin que el JS tenga que medir nada. Medirlo
+     no valía: con content-visibility las tarjetas de fuera de pantalla dan
+     una altura estimada, no la real. */
+  .views{ position:relative; overflow:hidden; }
+  .views-track{
+    display:flex; align-items:flex-start;
+    /* El navegador se queda el gesto vertical (scroll) y nos deja el
+       horizontal, así se puede arrastrar sin bloquear el scroll. */
+    touch-action:pan-y;
+  }
+  .view{ flex:0 0 100%; min-width:0; padding:14px 16px 0; box-sizing:border-box;
+    height:0; overflow:hidden; }
+  /* Abiertas: la activa siempre, y la vecina mientras dura el gesto. */
+  .view.abierta{ height:auto; overflow:visible; }
+  /* Solo se anima transform, que va en el compositor. La curva sale rápido y
+     frena al final, que es lo que se percibe como suave. */
+  .views-track.animando{ transition:transform 420ms cubic-bezier(0.22,0.9,0.28,1); }
+
 
   /* ---------- Cards (liquid glass panels) ---------- */
   .card{
@@ -702,13 +710,14 @@
     <div id="streakBadge"></div>
   </header>
 
+  <!-- Las tres pestañas van una al lado de otra en una cinta que sigue al
+       dedo; antes solo se pintaba la activa y el cambio era un salto. -->
   <div class="views" id="views">
-    <!-- RESUMEN -->
-    <section class="view active" id="view-resumen"></section>
-    <!-- HUCHAS -->
-    <section class="view" id="view-huchas"></section>
-    <!-- HISTORIAL -->
-    <section class="view" id="view-historial"></section>
+    <div class="views-track" id="viewsTrack">
+      <section class="view" id="view-resumen"></section>
+      <section class="view" id="view-huchas"></section>
+      <section class="view" id="view-historial"></section>
+    </div>
   </div>
 </div>
 
@@ -779,7 +788,7 @@
    a las diez, la décima sube sola (2.49 -> 2.5). Tiene que coincidir con
    la de package.json y con la del nombre de caché de sw.js: hay un
    comprobador en scripts/check-version.mjs que lo verifica. */
-const APP_VERSION = '2.61';
+const APP_VERSION = '2.62';
 
 /* ============ ICONS ============ */
 const ICONS = {
@@ -3223,55 +3232,133 @@ const tabs = ['resumen','huchas','historial'];
 let activeTab = 'resumen';
 const renderers = {resumen:renderResumen, huchas:renderHuchas, historial:renderHistorial};
 
-function setTab(name){
-  const prevIdx = tabs.indexOf(activeTab);
-  const idx = tabs.indexOf(name);
-  const dir = idx > prevIdx ? 'right' : 'left';
-  activeTab = name;
-  document.querySelectorAll('.navbtn').forEach(b=> b.classList.toggle('active', b.dataset.tab===name));
-  document.querySelectorAll('.view').forEach(v=>{
-    const isTarget = v.id === 'view-'+name;
-    v.classList.remove('enter-right','enter-left');
-    v.classList.toggle('active', isTarget);
-    if(isTarget) v.classList.add(dir==='right' ? 'enter-right' : 'enter-left');
-  });
-  document.getElementById('navpill').style.transform = `translateX(${idx*100}%)`;
-  renderers[name]();
+const viewsEl = document.getElementById('views');
+const trackEl = document.getElementById('viewsTrack');
+
+/* La cinta mide tres pantallas de ancho; moverse es llevarla a -idx/3. */
+function moverCinta(idx, animar){
+  trackEl.classList.toggle('animando', !!animar);
+  trackEl.style.transform = `translate3d(${-idx * 100 / tabs.length}%,0,0)`;
 }
+
+/* Qué pestañas ocupan alto. Solo la activa, salvo mientras se arrastra o se
+   anima, que también la vecina para que se vea entera mientras entra. */
+function abrir(...indices){
+  [...trackEl.children].forEach((v,i)=> v.classList.toggle('abierta', indices.includes(i)));
+}
+
+function pintarNav(idx){
+  document.querySelectorAll('.navbtn').forEach((b,i)=> b.classList.toggle('active', i === idx));
+  document.getElementById('navpill').style.transform = `translateX(${idx * 100}%)`;
+}
+
+function setTab(name, animar = true){
+  const idx = tabs.indexOf(name);
+  if(idx === -1) return;
+  const previo = tabs.indexOf(activeTab);
+  activeTab = name;
+  renderers[name]();
+  pintarNav(idx);
+  // Las dos quedan abiertas hasta que la cinta llega: si la saliente se
+  // plegara al empezar, desaparecería de golpe en mitad del viaje.
+  if(animar && previo !== -1 && previo !== idx) abrir(previo, idx);
+  else abrir(idx);
+  moverCinta(idx, animar);
+  if(animar) alCerrarViaje(()=> abrir(tabs.indexOf(activeTab)));
+}
+
+/* Un solo temporizador de cierre: si se cambia de pestaña otra vez antes de
+   llegar, el anterior no debe plegar la vista equivocada. */
+let viajeTimer = null;
+function alCerrarViaje(fn){
+  clearTimeout(viajeTimer);
+  viajeTimer = setTimeout(fn, 440);
+}
+
 document.querySelectorAll('.navbtn').forEach(btn=>{
   btn.addEventListener('click', ()=> setTab(btn.dataset.tab));
 });
 
-/* swipe gesture between tabs — direction-locked, ignores sliders/inputs/buttons */
-const viewsEl = document.getElementById('views');
-let tStartX = null, tStartY = null, tIgnore = false, tDecided = null;
+/* ---------- Arrastrar entre pestañas ----------
+   La cinta sigue al dedo en tiempo real. Al soltar decide por distancia y por
+   velocidad: un gesto corto pero rápido también cambia, que es lo que se
+   espera al pasar páginas. */
+let arrastrando = false;
+let x0 = 0, y0 = 0, eje = null, dxUlt = 0, tUlt = 0, velocidad = 0, idxInicio = 0;
 
-viewsEl.addEventListener('touchstart', e=>{
-  const t = e.target;
-  tIgnore = !!(t.closest && t.closest('input, button, .toggle2, .chip, .icon-btn, a, .gasto-swipe'));
-  tStartX = e.touches[0].clientX;
-  tStartY = e.touches[0].clientY;
-  tDecided = null;
+const UMBRAL_DIST = 0.28;     // parte del ancho de pantalla
+const UMBRAL_VEL  = 0.45;     // px por ms
+
+trackEl.addEventListener('touchstart', e=>{
+  // Lo que ya maneja su propio gesto horizontal no debe mover la cinta.
+  if(e.target.closest('.gasto-swipe, input, button, .bucket-picker, .tend-svg')) return;
+  if(e.touches.length !== 1) return;
+  arrastrando = true; eje = null;
+  x0 = e.touches[0].clientX; y0 = e.touches[0].clientY;
+  dxUlt = 0; velocidad = 0; tUlt = performance.now();
+  idxInicio = tabs.indexOf(activeTab);
+  trackEl.classList.remove('animando');
+  clearTimeout(viajeTimer);
 }, {passive:true});
 
-viewsEl.addEventListener('touchmove', e=>{
-  if(tIgnore || tStartX===null || tDecided==='vertical') return;
-  const dx = e.touches[0].clientX - tStartX;
-  const dy = e.touches[0].clientY - tStartY;
-  if(tDecided===null && (Math.abs(dx)>12 || Math.abs(dy)>12)){
-    // lock direction once the gesture is unambiguous; favors vertical scrolling
-    tDecided = Math.abs(dx) > Math.abs(dy) * 1.8 ? 'horizontal' : 'vertical';
+trackEl.addEventListener('touchmove', e=>{
+  if(!arrastrando) return;
+  const dx = e.touches[0].clientX - x0;
+  const dy = e.touches[0].clientY - y0;
+
+  if(eje === null){
+    if(Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+    // Se decide una vez y no se cambia: si no, al bajar en diagonal la cinta
+    // temblaría. Se favorece el scroll vertical.
+    eje = Math.abs(dx) > Math.abs(dy) * 1.3 ? 'x' : 'y';
+    if(eje === 'x'){
+      // Ahora que se sabe que es horizontal, la vecina tiene que estar
+      // pintada y caber a lo alto.
+      const destino = idxInicio + (dx < 0 ? 1 : -1);
+      if(destino >= 0 && destino < tabs.length){
+        renderers[tabs[destino]]();
+        abrir(idxInicio, destino);
+      }
+    }
   }
+  if(eje !== 'x') return;
+
+  const ahora = performance.now();
+  const dt = ahora - tUlt;
+  if(dt > 0) velocidad = (dx - dxUlt) / dt;
+  dxUlt = dx; tUlt = ahora;
+
+  // En los extremos el arrastre se amortigua, para que se note que no hay
+  // nada más en vez de quedarse muerto.
+  const borde = (idxInicio === 0 && dx > 0) || (idxInicio === tabs.length - 1 && dx < 0);
+  const mov = borde ? dx * 0.32 : dx;
+  const base = -idxInicio * 100 / tabs.length;
+  trackEl.style.transform = `translate3d(calc(${base}% + ${mov}px),0,0)`;
 }, {passive:true});
 
-viewsEl.addEventListener('touchend', e=>{
-  if(tIgnore || tStartX===null || tDecided!=='horizontal'){ tStartX=null; tDecided=null; return; }
-  const dx = e.changedTouches[0].clientX - tStartX;
-  const idx = tabs.indexOf(activeTab);
-  if(dx < -90 && idx < tabs.length-1) setTab(tabs[idx+1]);
-  else if(dx > 90 && idx > 0) setTab(tabs[idx-1]);
-  tStartX = null; tDecided = null;
-}, {passive:true});
+function soltarCinta(){
+  if(!arrastrando) return;
+  arrastrando = false;
+  if(eje !== 'x'){ eje = null; return; }
+  eje = null;
+
+  const ancho = viewsEl.offsetWidth || 1;
+  const bastanteLejos = Math.abs(dxUlt) > ancho * UMBRAL_DIST;
+  const bastanteRapido = Math.abs(velocidad) > UMBRAL_VEL && Math.abs(dxUlt) > 12;
+  let idx = idxInicio;
+  if(bastanteLejos || bastanteRapido) idx += dxUlt < 0 ? 1 : -1;
+  idx = Math.max(0, Math.min(tabs.length - 1, idx));
+
+  if(tabs[idx] === activeTab){
+    // Vuelve a su sitio sin repintar nada.
+    moverCinta(idx, true);
+    alCerrarViaje(()=> abrir(idx));
+  } else {
+    setTab(tabs[idx]);
+  }
+}
+trackEl.addEventListener('touchend', soltarCinta, {passive:true});
+trackEl.addEventListener('touchcancel', soltarCinta, {passive:true});
 
 /* ============ SERVICE WORKER ============ */
 if('serviceWorker' in navigator){
@@ -3336,10 +3423,19 @@ async function iniciarApp(){
   await load();
   processUrlGasto();
   updateQuickStats();
-  setTab('resumen');
-  document.getElementById('navpill').style.transition = 'none';
-  document.getElementById('navpill').style.transform = 'translateX(0%)';
-  requestAnimationFrame(()=>{ document.getElementById('navpill').style.transition = ''; });
+
+  // La primera colocación va sin animación, para no ver la cinta y la píldora
+  // deslizándose solas al abrir.
+  const pill = document.getElementById('navpill');
+  pill.style.transition = 'none';
+  setTab('resumen', false);
+  requestAnimationFrame(()=>{ pill.style.transition = ''; });
+
+  // Las vecinas se pintan en cuanto la primera pantalla está servida: así no
+  // retrasan el arranque, pero ya tienen contenido antes del primer arrastre.
+  const pintarVecinas = ()=> tabs.filter(t=> t !== activeTab).forEach(t=> renderers[t]());
+  if(window.requestIdleCallback) requestIdleCallback(pintarVecinas, {timeout:1200});
+  else setTimeout(pintarVecinas, 200);
 }
 </script>
 </body>

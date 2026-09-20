@@ -4,7 +4,7 @@
      Asi publicar una version nueva ya no exige tocar CACHE a mano.
    - El resto de estaticos van primero a cache (arranque instantaneo) y se
      refrescan de fondo para la proxima visita. */
-const CACHE = 'finanzas-2.61';
+const CACHE = 'finanzas-2.62';
 const ASSETS = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e=>{

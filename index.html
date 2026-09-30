@@ -565,6 +565,13 @@
   .gasto-periodo{ font-size:9.5px; font-weight:700; letter-spacing:0.06em; color:var(--text-faint);
     text-transform:uppercase; margin-left:7px; }
 
+  /* previsión de cuándo se alcanza la meta, abajo a la derecha de la hucha */
+  .hucha-eta{
+    margin-top:8px; text-align:right; font-size:11.5px; font-weight:700;
+    color:#34D399; line-height:1.35;
+  }
+  .hucha-eta.parado{ color:#FBAE3C; }
+
   /* aviso cuando el saldo no llega a lo que sueles gastar en esa hucha */
   .hucha-aviso{
     margin-top:9px; padding:8px 11px; border-radius:11px;
@@ -780,7 +787,7 @@
    a las diez, la décima sube sola (2.49 -> 2.5). Tiene que coincidir con
    la de package.json y con la del nombre de caché de sw.js: hay un
    comprobador en scripts/check-version.mjs que lo verifica. */
-const APP_VERSION = '2.64';
+const APP_VERSION = '2.65';
 
 /* ============ ICONS ============ */
 const ICONS = {
@@ -1985,22 +1992,63 @@ let editingBucket = null;
 const celebratedGoals = new Set();
 
 /* proyección: media de aportación mensual real (últimos 3 meses) a esa hucha */
-function avgMonthlyContribution(key, months=3){
-  const recent = state.historial.slice(0, months).filter(h=>h.aportadoHuchas);
-  if(recent.length===0) return 0;
-  const total = recent.reduce((s,h)=> s + (h.aportadoHuchas[key]||0), 0);
-  return total / recent.length;
+/* Ritmo real al que crece una hucha: lo que le entra por nómina menos lo que
+   se gasta de ella. Contar solo lo que entra daría previsiones que no se
+   cumplen en las huchas de las que además se gasta.
+
+   Se agrupa por MES, no por entrada del historial: desde que un mes puede
+   tener varias (segunda nómina, ingresos extra), coger "las tres últimas
+   entradas" podía ser un solo mes contado tres veces.
+
+   El mes en curso queda fuera: va a medias y hundiría la media. */
+function ritmoMensual(key, meses = 3){
+  const actual = currentMonthLabel();
+
+  const entra = new Map();
+  const mesesConNomina = [];
+  for(const h of state.historial){
+    if(h.label === actual) continue;
+    entra.set(h.label, (entra.get(h.label) || 0) + ((h.aportadoHuchas || {})[key] || 0));
+    if(!mesesConNomina.includes(h.label)) mesesConNomina.push(h.label);
+  }
+  // El historial va del más nuevo al más viejo, así que los primeros son los
+  // más recientes.
+  const ventana = mesesConNomina.slice(0, meses);
+  if(ventana.length === 0) return null;
+
+  const sale = new Map();
+  for(const g of (state.gastos || [])){
+    if(g.bucket !== key) continue;
+    const mes = etiquetaMesDe(g.date);
+    sale.set(mes, (sale.get(mes) || 0) + importeGasto(g));
+  }
+
+  const neto = ventana.reduce((s,m)=> s + (entra.get(m) || 0) - (sale.get(m) || 0), 0);
+  return { ritmo: neto / ventana.length, meses: ventana.length };
 }
+/* Pasados los dos años, "90 meses" no se lee: se dice en años. */
+function enMeses(n){
+  if(n < 24) return `${n} ${n === 1 ? 'mes' : 'meses'}`;
+  const anios = Math.floor(n / 12), resto = n % 12;
+  const a = `${anios} ${anios === 1 ? 'año' : 'años'}`;
+  return resto ? `${a} y ${resto} ${resto === 1 ? 'mes' : 'meses'}` : a;
+}
+
 function goalETA(key, cur, meta){
-  if(meta<=0 || cur>=meta) return null;
-  const avg = avgMonthlyContribution(key);
-  if(avg <= 0.5) return null;
-  const monthsLeft = Math.ceil((meta - cur) / avg);
-  if(monthsLeft <= 0) return null;
+  if(meta <= 0 || cur >= meta) return null;
+  const r = ritmoMensual(key);
+  if(!r) return null;
+  // Si de la hucha sale tanto como entra, no hay previsión que dar: decirlo
+  // es más útil que callarse y dejar el hueco.
+  if(r.ritmo <= 0.5) return { estancada:true, ritmo:r.ritmo, meses:r.meses };
+  const monthsLeft = Math.ceil((meta - cur) / r.ritmo);
+  // Más de cincuenta años no es una previsión, es ruido.
+  if(monthsLeft <= 0 || monthsLeft > 600) return { estancada:true, ritmo:r.ritmo, meses:r.meses };
   const d = new Date();
   d.setMonth(d.getMonth() + monthsLeft);
-  const when = `${monthNames[d.getMonth()].charAt(0)}${monthNames[d.getMonth()].slice(1).toLowerCase()} ${d.getFullYear()}`;
-  return { monthsLeft, when };
+  // Mes abreviado: el nombre entero parte la línea en pantallas estrechas.
+  const when = `${monthNames[d.getMonth()].slice(0,3).toLowerCase()} ${d.getFullYear()}`;
+  return { monthsLeft, when, cuanto: enMeses(monthsLeft), ritmo:r.ritmo, meses:r.meses };
 }
 
 /* La conjunta no es dinero solo tuyo, asi que en esta pestaña vive aparte:
@@ -2081,12 +2129,14 @@ function renderHuchas(){
           : ''; })()}
         ${hasMeta
           ? `<div class="hint" style="text-align:left; margin-top:8px;">
-               ${reached
-                 ? '🎉 ¡Objetivo cumplido!'
-                 : `${fmt(cur)} de ${fmt(meta)} · ${pct.toFixed(0)}%${eta ? ` · a este ritmo, en ${eta.monthsLeft} ${eta.monthsLeft===1?'mes':'meses'} (${eta.when})` : ''}`}
+               ${reached ? '🎉 ¡Objetivo cumplido!' : `${fmt(cur)} de ${fmt(meta)} · ${pct.toFixed(0)}%`}
              </div>`
           : `<div class="hint" style="text-align:left; margin-top:8px;">Toca el lápiz para fijar saldo o una meta</div>`
         }
+        ${eta ? (eta.estancada
+          ? `<div class="hucha-eta parado">De esta hucha sale casi tanto como entra</div>`
+          : `<div class="hucha-eta">A este ritmo tardarás ${eta.cuanto} · ${eta.when}</div>`
+        ) : ''}
       `}
     </div>
   `}).join('');
